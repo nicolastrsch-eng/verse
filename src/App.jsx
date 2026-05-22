@@ -336,33 +336,39 @@ const QUALITY_LABELS = {
 const NOTE_FREQUENCIES = [261.63, 277.18, 293.66, 311.13, 329.63, 349.23, 369.99, 392.00, 415.30, 440.00, 466.16, 493.88];
 
 let _audioCtx = null;
-function getAudioCtx() {
-  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (_audioCtx.state === 'suspended') _audioCtx.resume();
-  return _audioCtx;
-}
 
-function playPianoNote(noteIndex) {
+async function playPianoNote(noteIndex) {
   try {
-    const ctx  = getAudioCtx();
+    if (!_audioCtx) {
+      _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    // resume() is async — must await before scheduling nodes
+    if (_audioCtx.state === 'suspended') {
+      await _audioCtx.resume();
+    }
+    const ctx  = _audioCtx;
     const freq = NOTE_FREQUENCIES[noteIndex];
     const now  = ctx.currentTime;
-    const dur  = 3.5;
-    const master = ctx.createGain();
-    master.gain.setValueAtTime(0.5, now);
-    master.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-    master.connect(ctx.destination);
-    // Additive harmonics with slight inharmonicity to emulate piano string physics
-    [[1, 1.0], [2, 0.55], [3, 0.28], [4, 0.12], [5, 0.05], [6, 0.02]].forEach(([n, amp]) => {
+    // Higher harmonics decay faster, giving a bright attack that mellows out
+    [
+      [1, 0.8,  4.0],
+      [2, 0.45, 2.0],
+      [3, 0.22, 1.2],
+      [4, 0.10, 0.7],
+      [5, 0.04, 0.4],
+      [6, 0.02, 0.25],
+    ].forEach(([n, amp, decay]) => {
       const osc = ctx.createOscillator();
       const g   = ctx.createGain();
       osc.type = 'sine';
+      // Slight inharmonicity (piano string physics)
       osc.frequency.value = freq * n * (1 + 3e-4 * n * n);
-      g.gain.value = amp;
+      g.gain.setValueAtTime(amp, now);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + decay);
       osc.connect(g);
-      g.connect(master);
+      g.connect(ctx.destination);
       osc.start(now);
-      osc.stop(now + dur);
+      osc.stop(now + decay + 0.05);
     });
   } catch (_) {}
 }
