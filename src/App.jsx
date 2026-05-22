@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Sun, ArrowUpRight, CloudRain, ArrowDownRight, Zap, Sparkles, RotateCcw, Undo2, Check, X, ArrowLeft } from 'lucide-react';
 
 // ============================================================
@@ -333,42 +333,40 @@ const QUALITY_LABELS = {
 // ============================================================
 // PIANO AUDIO — grand piano synthesis (Web Audio API)
 // ============================================================
+// PIANO AUDIO — grand piano chord synthesis (Web Audio API)
+// ============================================================
 const NOTE_FREQUENCIES = [261.63, 277.18, 293.66, 311.13, 329.63, 349.23, 369.99, 392.00, 415.30, 440.00, 466.16, 493.88];
 
 let _audioCtx = null;
 
-async function playPianoNote(noteIndex) {
+// Returns frequencies for all chord notes, voiced above the root (octave 4).
+function chordFrequencies(root, quality) {
+  const intervals = CHORD_INTERVALS[quality] || CHORD_INTERVALS.maj;
+  const rootFreq  = NOTE_FREQUENCIES[root];
+  return intervals.map(iv => rootFreq * Math.pow(2, iv / 12));
+}
+
+async function playChord(root, quality) {
   try {
-    if (!_audioCtx) {
-      _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    // resume() is async — must await before scheduling nodes
-    if (_audioCtx.state === 'suspended') {
-      await _audioCtx.resume();
-    }
-    const ctx  = _audioCtx;
-    const freq = NOTE_FREQUENCIES[noteIndex];
-    const now  = ctx.currentTime;
-    // Higher harmonics decay faster, giving a bright attack that mellows out
-    [
-      [1, 0.8,  4.0],
-      [2, 0.45, 2.0],
-      [3, 0.22, 1.2],
-      [4, 0.10, 0.7],
-      [5, 0.04, 0.4],
-      [6, 0.02, 0.25],
-    ].forEach(([n, amp, decay]) => {
-      const osc = ctx.createOscillator();
-      const g   = ctx.createGain();
-      osc.type = 'sine';
-      // Slight inharmonicity (piano string physics)
-      osc.frequency.value = freq * n * (1 + 3e-4 * n * n);
-      g.gain.setValueAtTime(amp, now);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + decay);
-      osc.connect(g);
-      g.connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + decay + 0.05);
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_audioCtx.state === 'suspended') await _audioCtx.resume();
+    const ctx   = _audioCtx;
+    const freqs = chordFrequencies(root, quality);
+    const now   = ctx.currentTime;
+    freqs.forEach(freq => {
+      // Higher harmonics decay faster for piano-like brightness on attack
+      [[1, 0.6, 3.5], [2, 0.32, 2.0], [3, 0.16, 1.2], [4, 0.07, 0.7], [5, 0.03, 0.4]].forEach(([n, amp, decay]) => {
+        const osc = ctx.createOscillator();
+        const g   = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq * n * (1 + 3e-4 * n * n); // slight inharmonicity
+        g.gain.setValueAtTime(amp / freqs.length, now);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + decay);
+        osc.connect(g);
+        g.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + decay + 0.05);
+      });
     });
   } catch (_) {}
 }
@@ -440,6 +438,24 @@ export default function App() {
   const handleValidate    = () => { setEditingIndex(null); setView('final'); };
   const handleBackToEdit  = () => setView('build');
 
+  // Keyboard shortcut: press A–G to play that chord with the current quality.
+  const currentChordRef = useRef(null);
+  useEffect(() => { currentChordRef.current = currentChord; });
+  useEffect(() => {
+    const KEY_ROOT = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
+    const onKeyDown = (e) => {
+      if (e.repeat) return;
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      const root = KEY_ROOT[e.key.toLowerCase()];
+      if (root !== undefined) {
+        const quality = currentChordRef.current?.quality ?? 'maj';
+        playChord(root, quality);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   return (
     <div
       className="min-h-screen relative overflow-x-hidden"
@@ -502,7 +518,6 @@ export default function App() {
           showPiano={showPiano}
           setShowGuitar={setShowGuitar}
           setShowPiano={setShowPiano}
-          playNote={playPianoNote}
         />
       ) : (
         <BuildScreen
@@ -525,7 +540,6 @@ export default function App() {
           setShowGuitar={setShowGuitar}
           setShowPiano={setShowPiano}
           setShowScales={setShowScales}
-          playNote={playPianoNote}
         />
       )}
     </div>
@@ -671,7 +685,7 @@ function BuildScreen({ progression, currentChord, suggestions, editingIndex,
                        onSuggestion, onAddChord, onEdit, onCancelEdit, onReplace, onJump,
                        onUndo, onReset, onValidate,
                        showGuitar, showPiano, showScales,
-                       setShowGuitar, setShowPiano, setShowScales, playNote }) {
+                       setShowGuitar, setShowPiano, setShowScales }) {
   const isEditing   = editingIndex !== null;
   const focusedChord = isEditing ? progression[editingIndex] : currentChord;
   const prevChord    = isEditing && editingIndex > 0 ? progression[editingIndex - 1] : null;
@@ -721,7 +735,6 @@ function BuildScreen({ progression, currentChord, suggestions, editingIndex,
         setShowPiano={setShowPiano}
         setShowScales={setShowScales}
         onAddChord={onAddChord}
-        playNote={playNote}
       />
 
       {/* edit panel OR suggestions */}
@@ -889,7 +902,7 @@ function Controls({ onUndo, onReset, canUndo }) {
 // CHORD DIAGRAMS (guitare + piano)
 // ============================================================
 function ChordDiagrams({ chord, showGuitar, showPiano, showScales,
-                         setShowGuitar, setShowPiano, setShowScales, onAddChord, playNote }) {
+                         setShowGuitar, setShowPiano, setShowScales, onAddChord }) {
   const both = showGuitar && showPiano;
   const any  = showGuitar || showPiano;
   const hasScales = typeof setShowScales === 'function';
@@ -918,7 +931,7 @@ function ChordDiagrams({ chord, showGuitar, showPiano, showScales,
           )}
           {showPiano && (
             <div className="flex flex-col items-center">
-              <PianoDiagram chord={chord} onPlayNote={playNote} />
+              <PianoDiagram chord={chord} />
               <div className="f-mono text-[9px] tracking-[0.25em] uppercase mt-2" style={{ color: '#7a7488' }}>
                 piano
               </div>
@@ -1085,9 +1098,7 @@ function GuitarDiagram({ chord }) {
 // ------------------------------------------------------------
 // Piano diagram (one octave, C → B, chord notes highlighted)
 // ------------------------------------------------------------
-function PianoDiagram({ chord, onPlayNote }) {
-  const [pressed, setPressed] = useState(null);
-
+function PianoDiagram({ chord }) {
   const notes = new Set(chordNotes(chord.root, chord.quality));
   const isMinor = chord.quality === 'min' || chord.quality === 'm7';
   const label = (n) => (isMinor ? NOTE_MINOR : NOTE_MAJOR)[n];
@@ -1115,60 +1126,40 @@ function PianoDiagram({ chord, onPlayNote }) {
   const blackOff     = '#0a0911';
   const blackOnRoot  = '#ede5d8';
   const blackOnOther = '#a8a0b8';
-  const pressedCol   = '#c58aa0';
   const stroke       = '#3a334a';
-
-  const handleKey = (note) => {
-    if (!onPlayNote) return;
-    onPlayNote(note);
-    setPressed(note);
-    setTimeout(() => setPressed(p => p === note ? null : p), 220);
-  };
-
-  const cursor = onPlayNote ? 'pointer' : 'default';
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: 175, display: 'block' }}>
       {/* White keys */}
       {WHITES.map((note, i) => {
-        const inChord  = notes.has(note);
-        const isRoot   = note === chord.root;
-        const isPressed = pressed === note;
-        const fill = isPressed ? pressedCol
-          : inChord ? (isRoot ? whiteOnRoot : whiteOnOther) : whiteOff;
+        const inChord = notes.has(note);
+        const isRoot  = note === chord.root;
         return (
           <rect
             key={`w${note}`}
             x={i * whiteW} y={0}
             width={whiteW} height={whiteH}
-            fill={fill}
+            fill={inChord ? (isRoot ? whiteOnRoot : whiteOnOther) : whiteOff}
             stroke={stroke} strokeWidth={1}
-            style={{ cursor }}
-            onClick={() => handleKey(note)}
           />
         );
       })}
       {/* Black keys */}
       {BLACKS.map(({ note, after }) => {
-        const inChord  = notes.has(note);
-        const isRoot   = note === chord.root;
-        const isPressed = pressed === note;
+        const inChord = notes.has(note);
+        const isRoot  = note === chord.root;
         const cx = (after + 1) * whiteW;
-        const fill = isPressed ? pressedCol
-          : inChord ? (isRoot ? blackOnRoot : blackOnOther) : blackOff;
         return (
           <rect
             key={`b${note}`}
             x={cx - blackW / 2} y={0}
             width={blackW} height={blackH}
-            fill={fill}
+            fill={inChord ? (isRoot ? blackOnRoot : blackOnOther) : blackOff}
             stroke={stroke} strokeWidth={1}
-            style={{ cursor }}
-            onClick={() => handleKey(note)}
           />
         );
       })}
-      {/* Note labels (only for chord notes, non-interactive) */}
+      {/* Note labels (only for chord notes) */}
       {WHITES.map((note, i) => {
         if (!notes.has(note)) return null;
         const isRoot = note === chord.root;
@@ -1181,7 +1172,6 @@ function PianoDiagram({ chord, onPlayNote }) {
             fill={isRoot ? text : muted}
             fontSize={8.5}
             fontFamily="'JetBrains Mono', monospace"
-            style={{ pointerEvents: 'none' }}
           >
             {label(note)}
           </text>
@@ -1199,7 +1189,6 @@ function PianoDiagram({ chord, onPlayNote }) {
             fill={isRoot ? text : muted}
             fontSize={8.5}
             fontFamily="'JetBrains Mono', monospace"
-            style={{ pointerEvents: 'none' }}
           >
             {label(note)}
           </text>
@@ -1330,7 +1319,7 @@ function ChordSelector({ onSelect, currentChord }) {
 // ============================================================
 // FINAL SCREEN (suite validée)
 // ============================================================
-function FinalScreen({ progression, onBack, onReset, showGuitar, showPiano, setShowGuitar, setShowPiano, playNote }) {
+function FinalScreen({ progression, onBack, onReset, showGuitar, showPiano, setShowGuitar, setShowPiano }) {
   return (
     <div className="relative z-10 max-w-3xl mx-auto px-5 sm:px-8 py-8 sm:py-12">
       {/* header */}
@@ -1366,7 +1355,6 @@ function FinalScreen({ progression, onBack, onReset, showGuitar, showPiano, setS
             showGuitar={showGuitar}
             showPiano={showPiano}
             delay={180 + i * 40}
-            playNote={playNote}
           />
         ))}
       </div>
@@ -1436,7 +1424,7 @@ function ProgressionFlow({ progression }) {
   );
 }
 
-function ChordCard({ chord, index, showGuitar, showPiano, delay, playNote }) {
+function ChordCard({ chord, index, showGuitar, showPiano, delay }) {
   const anyDiagram = showGuitar || showPiano;
   return (
     <div
@@ -1467,7 +1455,7 @@ function ChordCard({ chord, index, showGuitar, showPiano, delay, playNote }) {
           )}
           {showPiano && (
             <div className="flex flex-col items-center">
-              <PianoDiagram chord={chord} onPlayNote={playNote} />
+              <PianoDiagram chord={chord} />
               <div className="f-mono text-[9px] tracking-[0.25em] uppercase mt-1.5" style={{ color: '#7a7488' }}>
                 piano
               </div>
