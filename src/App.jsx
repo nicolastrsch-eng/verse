@@ -448,7 +448,8 @@ async function playChord(root, quality) {
 // SPOTIFY INTEGRATION (OAuth PKCE + Web API)
 // ============================================================
 
-function getSpotifyClientId()  { return localStorage.getItem('spotify_client_id') || ''; }
+const SPOTIFY_CLIENT_ID = '58d762bfddfa4593a35c7de8ed0bfc48';
+function getSpotifyClientId()  { return localStorage.getItem('spotify_client_id') || SPOTIFY_CLIENT_ID; }
 function getSpotifyToken() {
   const token  = localStorage.getItem('spotify_token');
   const expiry = localStorage.getItem('spotify_token_expiry');
@@ -576,6 +577,55 @@ function processSpotifyData(tracks, features) {
       ]).map(s => ({ ...s, id: `sp${root}${g.mode}-${s.id}` }));
       return { name, isMajor, count: g.tracks.length, mood: moodFromValence(g.vSum / g.tracks.length), suggestions, sourceTracks: top3 };
     });
+}
+
+async function fetchTopArtists(token) {
+  const data = await spotifyGet('me/top/artists?limit=50&time_range=medium_term', token);
+  return data.items || [];
+}
+
+// Fallback when audio-features is unavailable: infer a major/minor leaning
+// from the genres of the user's top artists, then propose chords in
+// representative keys for that leaning.
+function processGenreData(artists) {
+  const count = {};
+  artists.forEach(a => (a.genres || []).forEach(g => { count[g] = (count[g] || 0) + 1; }));
+  const topGenres = Object.entries(count).sort((a, b) => b[1] - a[1]).slice(0, 6).map(e => e[0]);
+
+  const darkKw   = ['sad','doom','black metal','death','emo','shoegaze','gothic','darkwave','post-punk','slowcore','metal','grunge','blues','ambient','sadcore','dark'];
+  const brightKw = ['pop','dance','disco','funk','tropical','reggae','afrobeat','house','synthpop','k-pop','happy'];
+  let dark = 0, bright = 0;
+  topGenres.forEach(g => {
+    if (darkKw.some(k => g.includes(k)))   dark++;
+    if (brightKw.some(k => g.includes(k))) bright++;
+  });
+  const leanMinor = dark >= bright;
+
+  const picks = leanMinor
+    ? [{ root: 9, major: false }, { root: 4, major: false }, { root: 2, major: false }] // Am Em Dm
+    : [{ root: 0, major: true  }, { root: 7, major: true  }, { root: 9, major: true  }]; // C G A
+
+  const attr = (topGenres.slice(0, 3).join(' · ')) || artists.slice(0, 3).map(a => a.name).join(' · ');
+  const tags = (topGenres.length ? topGenres.slice(0, 3) : artists.slice(0, 3).map(a => a.name)).map(g => ({ artist: '', name: g }));
+
+  return picks.map(p => {
+    const scale = SCALES.find(s => s.id === (p.major ? 'major' : 'minor'));
+    const root  = p.root;
+    const suggestions = (p.major ? [
+      makeSuggestion(root,      'maj', 'I',   'joyful',      attr),
+      makeSuggestion(root + 9,  'min', 'vi',  'melancholic', attr),
+      makeSuggestion(root + 5,  'maj', 'IV',  'joyful',      attr),
+      makeSuggestion(root + 7,  'maj', 'V',   'brighter',    attr),
+      makeSuggestion(root + 2,  'min', 'ii',  'dreamy',      attr),
+    ] : [
+      makeSuggestion(root,      'min', 'i',   'melancholic', attr),
+      makeSuggestion(root + 8,  'maj', 'VI',  'melancholic', attr),
+      makeSuggestion(root + 10, 'maj', 'VII', 'brighter',    attr),
+      makeSuggestion(root + 5,  'min', 'iv',  'darker',      attr),
+      makeSuggestion(root + 3,  'maj', 'III', 'joyful',      attr),
+    ]).map(s => ({ ...s, id: `gn${root}${p.major ? 1 : 0}-${s.id}` }));
+    return { name: scaleRootName(scale, root), isMajor: p.major, count: null, mood: leanMinor ? 'melancholic' : 'joyful', suggestions, sourceTracks: tags, genreBased: true };
+  });
 }
 
 // ============================================================
@@ -1906,8 +1956,18 @@ function SpotifyScreen({ onStart, onBack }) {
     setPhase('loading');
     try {
       const tracks = await fetchRecentTracks(token);
-      const feats  = await fetchAudioFeatures(token, tracks.map(t => t.id));
-      setGroups(processSpotifyData(tracks, feats));
+      let data = [];
+      try {
+        const feats = await fetchAudioFeatures(token, tracks.map(t => t.id));
+        data = processSpotifyData(tracks, feats);
+      } catch (e) {
+        if (e.message !== 'spotify-403') throw e; // audio-features restricted → fall back
+      }
+      if (!data.length) {
+        const artists = await fetchTopArtists(token);
+        data = processGenreData(artists);
+      }
+      setGroups(data);
       setPhase('ready');
     } catch (e) {
       if (e.message === '401') { clearSpotifyAuth(); setPhase('login'); }
@@ -2054,15 +2114,15 @@ function SpotifyScreen({ onStart, onBack }) {
                   {g.name}
                 </span>
                 <span className="f-mono text-[10px] tracking-[0.15em] uppercase" style={{ color: '#7a7488' }}>
-                  {g.isMajor ? 'majeure' : 'mineure'} · {g.count} morceau{g.count > 1 ? 'x' : ''}
+                  {g.isMajor ? 'majeure' : 'mineure'}{g.count != null ? ` · ${g.count} morceau${g.count > 1 ? 'x' : ''}` : ' · d\'après vos genres'}
                 </span>
               </div>
-              {/* source tracks */}
+              {/* source tracks / genres */}
               <div className="flex flex-wrap gap-1.5 mb-4">
                 {g.sourceTracks.map((t, ti) => (
                   <span key={ti} className="f-display italic text-[10px] px-2 py-0.5 rounded-sm"
                     style={{ color: '#a8a0b8', backgroundColor: '#1d1a28', border: '1px solid #3a334a' }}>
-                    {t.artist} – {t.name}
+                    {t.artist ? `${t.artist} – ${t.name}` : t.name}
                   </span>
                 ))}
               </div>
