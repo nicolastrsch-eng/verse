@@ -630,6 +630,62 @@ function processGenreData(artists) {
 }
 
 // ============================================================
+// HOOKTHEORY (real-world chord trends, via Cloudflare proxy)
+// ============================================================
+function getHtProxy() { return localStorage.getItem('ht_proxy') || ''; }
+
+const HT_MAJOR_DEG = { 0:1, 2:2, 4:3, 5:4, 7:5, 9:6, 11:7 };  // interval → scale degree
+const HT_DEG_IV    = { 1:0, 2:2, 3:4, 4:5, 5:7, 6:9, 7:11 };  // degree → interval
+const HT_DEG_QUAL  = { 1:'maj', 2:'min', 3:'min', 4:'maj', 5:'maj', 6:'min', 7:'dim' };
+
+// Reference major tonic (minor keys are mapped to their relative major).
+function htRefTonic(progression) {
+  const key = detectKey(progression);
+  if (!key) return progression[0] ? progression[0].root : 0;
+  return key.scale.id === 'major' ? key.root : (key.root + 3) % 12;
+}
+
+// Hooktheory child-path built from the diatonic tail of the progression.
+function htBuildCp(progression) {
+  const tonic = htRefTonic(progression);
+  let degs = [];
+  for (const c of progression) {
+    const iv = ((c.root - tonic) % 12 + 12) % 12;
+    const d = HT_MAJOR_DEG[iv];
+    if (d === undefined) { degs = []; continue; } // non-diatonic chord resets the path
+    degs.push(d);
+  }
+  return { tonic, cp: degs.slice(-4).join(',') };
+}
+
+async function htFetch(kind, cp) {
+  const base = getHtProxy();
+  if (!base) throw new Error('no-proxy');
+  const res = await fetch(`${base.replace(/\/$/, '')}/${kind}?cp=${encodeURIComponent(cp)}`);
+  if (!res.ok) throw new Error('ht-' + res.status);
+  return res.json();
+}
+
+function htParseNodes(nodes, tonic) {
+  return (nodes || []).map(n => {
+    const deg = parseInt(String(n.chord_ID ?? n.id ?? ''), 10);
+    if (!Object.prototype.hasOwnProperty.call(HT_DEG_IV, deg)) return null; // skip applied/borrowed
+    return {
+      root: (tonic + HT_DEG_IV[deg]) % 12,
+      quality: HT_DEG_QUAL[deg],
+      prob: Number(n.probability) || 0,
+    };
+  }).filter(Boolean).sort((a, b) => b.prob - a.prob).slice(0, 6);
+}
+
+function htParseSongs(songs) {
+  return (songs || []).map(s => ({
+    artist: s.artist || '',
+    song: s.song || s.name || '',
+  })).filter(s => s.song).slice(0, 8);
+}
+
+// ============================================================
 // APP
 // ============================================================
 export default function App() {
@@ -1065,6 +1121,7 @@ function BuildScreen({ progression, currentChord, suggestions, editingIndex,
             <span className="flex-1 h-px" style={{ backgroundColor: '#3a334a', opacity: 0.5 }} />
           </div>
           <SuggestionsGrid suggestions={suggestions} onSelect={onSuggestion} />
+          <HooktheoryPanel progression={progression} onAdd={onAddChord} />
         </div>
       )}
 
@@ -2143,6 +2200,148 @@ function SpotifyScreen({ onStart, onBack }) {
         </button>
       }/>
     </Wrap>
+  );
+}
+
+// ============================================================
+// HOOKTHEORY PANEL (suggestions issues de vraies chansons)
+// ============================================================
+const _htCache = new Map();
+
+function HooktheoryPanel({ progression, onAdd }) {
+  const [proxy,  setProxy]  = useState(getHtProxy());
+  const [input,  setInput]  = useState(getHtProxy());
+  const [status, setStatus] = useState('idle'); // idle|loading|ready|error|nondiatonic
+  const [nodes,  setNodes]  = useState([]);
+  const [songs,  setSongs]  = useState([]);
+
+  const { tonic, cp } = useMemo(() => htBuildCp(progression), [progression]);
+
+  useEffect(() => {
+    if (!proxy) { setStatus('idle'); return; }
+    if (!cp)    { setStatus('nondiatonic'); setNodes([]); setSongs([]); return; }
+    if (_htCache.has(cp)) {
+      const c = _htCache.get(cp);
+      setNodes(htParseNodes(c.nodes, tonic));
+      setSongs(htParseSongs(c.songs));
+      setStatus('ready');
+      return;
+    }
+    let cancelled = false;
+    setStatus('loading');
+    const timer = setTimeout(async () => {
+      try {
+        const multi = cp.split(',').length >= 2;
+        const [nodesRes, songsRes] = await Promise.all([
+          htFetch('nodes', cp),
+          multi ? htFetch('songs', cp) : Promise.resolve([]),
+        ]);
+        if (cancelled) return;
+        _htCache.set(cp, { nodes: nodesRes, songs: songsRes });
+        setNodes(htParseNodes(nodesRes, tonic));
+        setSongs(htParseSongs(songsRes));
+        setStatus('ready');
+      } catch (_) {
+        if (!cancelled) setStatus('error');
+      }
+    }, 450);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [proxy, cp, tonic]);
+
+  const Label = ({ children }) => (
+    <div className="text-[10px] tracking-[0.25em] uppercase mb-3 flex items-center gap-3" style={{ color: '#7a7488' }}>
+      <span style={{ color: '#1db954' }}>♬</span>
+      <span>{children}</span>
+      <span className="flex-1 h-px" style={{ backgroundColor: '#3a334a', opacity: 0.5 }} />
+    </div>
+  );
+
+  if (!proxy) return (
+    <div className="mt-8">
+      <Label>dans la vraie musique · hooktheory</Label>
+      <div className="p-4 rounded-sm" style={{ backgroundColor: '#1a1727', border: '1px solid #3a334a' }}>
+        <p className="f-mono text-[11px] leading-relaxed mb-3" style={{ color: '#968ea0' }}>
+          Collez l'URL de votre proxy Cloudflare pour activer les suggestions tirées de vraies chansons.
+        </p>
+        <input
+          className="f-mono w-full text-xs px-3 py-2 rounded-sm mb-3 outline-none"
+          style={{ backgroundColor: '#14121c', border: '1px solid #5a526a', color: '#ede5d8' }}
+          placeholder="https://verse-hooktheory.xxx.workers.dev"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && input.trim() && (localStorage.setItem('ht_proxy', input.trim()), setProxy(input.trim()))}
+        />
+        <button
+          onClick={() => { const v = input.trim(); if (!v) return; localStorage.setItem('ht_proxy', v); setProxy(v); }}
+          className="f-mono text-[11px] tracking-[0.2em] uppercase px-4 py-2 rounded-sm"
+          style={{ backgroundColor: '#252237', border: '1px solid #5a526a', color: '#ede5d8' }}
+        >
+          activer
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="mt-8">
+      <Label>dans la vraie musique · hooktheory</Label>
+      {status === 'loading'     && <p className="f-mono text-[11px]" style={{ color: '#7a7488' }}>recherche dans 70 000 morceaux…</p>}
+      {status === 'nondiatonic' && <p className="f-mono text-[11px]" style={{ color: '#7a7488' }}>suite trop chromatique pour une lecture Hooktheory.</p>}
+      {status === 'error'       && <p className="f-mono text-[11px]" style={{ color: '#cc7a6e' }}>proxy injoignable — vérifiez l'URL et les secrets du Worker.</p>}
+      {status === 'ready' && (
+        <>
+          {nodes.length > 0 && (
+            <div className="mb-5">
+              <div className="f-mono text-[10px] tracking-[0.18em] uppercase mb-2" style={{ color: '#968ea0' }}>
+                accords suivants les plus fréquents
+              </div>
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                {nodes.map((n, i) => (
+                  <button
+                    key={i}
+                    onClick={() => onAdd({ root: n.root, quality: n.quality })}
+                    className="f-mono py-2 px-1 rounded-sm flex flex-col items-center transition-all"
+                    style={{ backgroundColor: '#1f1c2a', border: '1px solid #3a334a', color: '#ede5d8' }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = '#1db954'; e.currentTarget.style.backgroundColor = '#252237'; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = '#3a334a'; e.currentTarget.style.backgroundColor = '#1f1c2a'; }}
+                  >
+                    <span className="text-sm">{chordName(n.root, n.quality)}</span>
+                    <span className="text-[9px] mt-0.5" style={{ color: '#7a7488' }}>{Math.round(n.prob * 100)}%</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {songs.length > 0 && (
+            <div>
+              <div className="f-mono text-[10px] tracking-[0.18em] uppercase mb-2" style={{ color: '#968ea0' }}>
+                morceaux qui utilisent cette suite
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {songs.map((s, i) => (
+                  <span key={i} className="f-display italic text-[10px] px-2 py-0.5 rounded-sm"
+                    style={{ color: '#a8a0b8', backgroundColor: '#1d1a28', border: '1px solid #3a334a' }}>
+                    {s.artist ? `${s.artist} – ${s.song}` : s.song}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {nodes.length === 0 && songs.length === 0 && (
+            <p className="f-mono text-[11px]" style={{ color: '#7a7488' }}>aucune donnée pour cette suite.</p>
+          )}
+        </>
+      )}
+      <button
+        onClick={() => { localStorage.removeItem('ht_proxy'); setProxy(''); }}
+        className="mt-4 text-[10px] tracking-[0.2em] uppercase transition-colors"
+        style={{ color: '#5a526a' }}
+        onMouseEnter={e => e.currentTarget.style.color = '#968ea0'}
+        onMouseLeave={e => e.currentTarget.style.color = '#5a526a'}
+      >
+        changer le proxy
+      </button>
+    </div>
   );
 }
 
