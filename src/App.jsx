@@ -513,18 +513,19 @@ async function spotifyGet(path, token) {
   return res.json();
 }
 
-async function fetchRecentTracks(token) {
-  const data = await spotifyGet('me/player/recently-played?limit=50', token);
+// Top 100 tracks over the last ~6 months (medium_term); paginated (max 50/req).
+async function fetchTopTracks(token) {
+  const [a, b] = await Promise.all([
+    spotifyGet('me/top/tracks?limit=50&time_range=medium_term&offset=0', token),
+    spotifyGet('me/top/tracks?limit=50&time_range=medium_term&offset=50', token),
+  ]);
+  const items = [...(a.items || []), ...(b.items || [])];
   const seen = new Set();
-  return (data.items || []).filter(item => {
-    if (seen.has(item.track.id)) return false;
-    seen.add(item.track.id);
+  return items.filter(t => {
+    if (!t || seen.has(t.id)) return false;
+    seen.add(t.id);
     return true;
-  }).map(item => ({
-    id: item.track.id,
-    name: item.track.name,
-    artist: item.track.artists[0].name,
-  }));
+  }).map(t => ({ id: t.id, name: t.name, artist: t.artists[0].name }));
 }
 
 async function fetchAudioFeatures(token, ids) {
@@ -1955,7 +1956,7 @@ function SpotifyScreen({ onStart, onBack }) {
   const loadData = async (token) => {
     setPhase('loading');
     try {
-      const tracks = await fetchRecentTracks(token);
+      const tracks = await fetchTopTracks(token);
       let data = [];
       try {
         const feats = await fetchAudioFeatures(token, tracks.map(t => t.id));
@@ -1998,7 +1999,7 @@ function SpotifyScreen({ onStart, onBack }) {
     <div className="mb-6 anim-fade">
       <div className="text-[10px] tracking-[0.3em] uppercase mb-2 flex items-center gap-3" style={{ color: '#7a7488' }}>
         <span style={{ color: '#1db954' }}>●</span>
-        <span style={{ opacity: 0.5 }}>écoutes récentes</span>
+        <span style={{ opacity: 0.5 }}>top · 6 mois</span>
         <span className="flex-1 h-px" style={{ backgroundColor: '#3a334a' }} />
       </div>
       <h1 className="f-display italic text-2xl sm:text-3xl" style={{ color: '#ede5d8' }}>vos tonalités</h1>
@@ -2050,7 +2051,7 @@ function SpotifyScreen({ onStart, onBack }) {
     <Wrap>
       <Header/>
       <p className="f-mono text-[11px] leading-relaxed mb-6" style={{ color: '#968ea0' }}>
-        Connectez votre compte Spotify pour enrichir verse avec les tonalités de vos 50 dernières écoutes.
+        Connectez votre compte Spotify pour enrichir verse avec les tonalités de vos 100 titres les plus écoutés des 6 derniers mois.
       </p>
       <button
         onClick={() => initiateSpotifyLogin(getSpotifyClientId())}
@@ -2073,7 +2074,7 @@ function SpotifyScreen({ onStart, onBack }) {
   if (phase === 'idle' || phase === 'loading') return (
     <Wrap>
       <Header/>
-      <p className="f-mono text-[11px]" style={{ color: '#7a7488' }}>chargement de vos écoutes…</p>
+      <p className="f-mono text-[11px]" style={{ color: '#7a7488' }}>analyse de vos top titres…</p>
       <Footer/>
     </Wrap>
   );
@@ -2097,7 +2098,7 @@ function SpotifyScreen({ onStart, onBack }) {
     <Wrap>
       <Header/>
       <p className="f-mono text-[11px] mb-8 leading-relaxed" style={{ color: '#968ea0' }}>
-        Touchez un accord pour démarrer une progression — les suggestions sont dérivées des tonalités de vos écoutes récentes.
+        Touchez un accord pour démarrer une progression — les suggestions sont dérivées de vos 100 titres les plus écoutés des 6 derniers mois.
       </p>
 
       {groups.length === 0 ? (
