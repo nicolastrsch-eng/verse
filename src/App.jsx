@@ -445,6 +445,140 @@ async function playChord(root, quality) {
 }
 
 // ============================================================
+// SPOTIFY INTEGRATION (OAuth PKCE + Web API)
+// ============================================================
+
+function getSpotifyClientId()  { return localStorage.getItem('spotify_client_id') || ''; }
+function getSpotifyToken() {
+  const token  = localStorage.getItem('spotify_token');
+  const expiry = localStorage.getItem('spotify_token_expiry');
+  if (token && expiry && Date.now() < parseInt(expiry, 10)) return token;
+  return null;
+}
+function clearSpotifyAuth() {
+  ['spotify_token','spotify_token_expiry','spotify_state','spotify_verifier'].forEach(k => localStorage.removeItem(k));
+}
+
+function spotifyRedirectUri() {
+  const p = window.location.pathname;
+  return window.location.origin + (p.endsWith('/') ? p : p + '/');
+}
+
+// PKCE helpers
+function genRandStr(n) {
+  const a = new Uint8Array(n);
+  crypto.getRandomValues(a);
+  return btoa(String.fromCharCode(...a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'').slice(0, n);
+}
+async function pkceChallenge(verifier) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
+}
+
+async function initiateSpotifyLogin(clientId) {
+  const verifier  = genRandStr(128);
+  const challenge = await pkceChallenge(verifier);
+  const state     = genRandStr(16);
+  localStorage.setItem('spotify_verifier', verifier);
+  localStorage.setItem('spotify_state',    state);
+  const p = new URLSearchParams({
+    response_type: 'code', client_id: clientId,
+    scope: 'user-read-recently-played user-top-read',
+    redirect_uri: spotifyRedirectUri(), state,
+    code_challenge_method: 'S256', code_challenge: challenge,
+  });
+  window.location.href = 'https://accounts.spotify.com/authorize?' + p;
+}
+
+async function exchangeToken(code, clientId) {
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code', code,
+      redirect_uri: spotifyRedirectUri(), client_id: clientId,
+      code_verifier: localStorage.getItem('spotify_verifier') || '',
+    }),
+  });
+  return res.json();
+}
+
+async function spotifyGet(path, token) {
+  const res = await fetch('https://api.spotify.com/v1/' + path, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new Error('401');
+  if (!res.ok) throw new Error('spotify-' + res.status);
+  return res.json();
+}
+
+async function fetchRecentTracks(token) {
+  const data = await spotifyGet('me/player/recently-played?limit=50', token);
+  const seen = new Set();
+  return (data.items || []).filter(item => {
+    if (seen.has(item.track.id)) return false;
+    seen.add(item.track.id);
+    return true;
+  }).map(item => ({
+    id: item.track.id,
+    name: item.track.name,
+    artist: item.track.artists[0].name,
+  }));
+}
+
+async function fetchAudioFeatures(token, ids) {
+  if (!ids.length) return [];
+  const data = await spotifyGet('audio-features?ids=' + ids.slice(0, 100).join(','), token);
+  return data.audio_features || [];
+}
+
+function moodFromValence(v) {
+  if (v > 0.7) return 'joyful';
+  if (v > 0.5) return 'brighter';
+  if (v > 0.3) return 'melancholic';
+  return 'darker';
+}
+
+function processSpotifyData(tracks, features) {
+  const map = {};
+  tracks.forEach((track, i) => {
+    const f = features[i];
+    if (!f || f.key < 0) return;
+    const id = `${f.key}-${f.mode}`;
+    if (!map[id]) map[id] = { key: f.key, mode: f.mode, tracks: [], vSum: 0 };
+    map[id].tracks.push(track);
+    map[id].vSum += (f.valence ?? 0.5);
+  });
+
+  return Object.values(map)
+    .sort((a, b) => b.tracks.length - a.tracks.length)
+    .slice(0, 4)
+    .map(g => {
+      const isMajor = g.mode === 1;
+      const scale   = SCALES.find(s => s.id === (isMajor ? 'major' : 'minor'));
+      const root    = g.key;
+      const name    = scaleRootName(scale, root);
+      const top3    = g.tracks.slice(0, 3);
+      const attr    = top3.slice(0, 2).map(t => `${t.artist} – ${t.name}`).join(' · ');
+      const suggestions = (isMajor ? [
+        makeSuggestion(root,      'maj', 'I',   'joyful',      attr),
+        makeSuggestion(root + 9,  'min', 'vi',  'melancholic', attr),
+        makeSuggestion(root + 5,  'maj', 'IV',  'joyful',      attr),
+        makeSuggestion(root + 7,  'maj', 'V',   'brighter',    attr),
+        makeSuggestion(root + 2,  'min', 'ii',  'dreamy',      attr),
+      ] : [
+        makeSuggestion(root,      'min', 'i',   'melancholic', attr),
+        makeSuggestion(root + 8,  'maj', 'VI',  'melancholic', attr),
+        makeSuggestion(root + 10, 'maj', 'VII', 'brighter',    attr),
+        makeSuggestion(root + 5,  'min', 'iv',  'darker',      attr),
+        makeSuggestion(root + 3,  'maj', 'III', 'joyful',      attr),
+      // prefix ids to avoid key collisions across groups
+      ]).map(s => ({ ...s, id: `sp${root}${g.mode}-${s.id}` }));
+      return { name, isMajor, count: g.tracks.length, mood: moodFromValence(g.vSum / g.tracks.length), suggestions, sourceTracks: top3 };
+    });
+}
+
+// ============================================================
 // APP
 // ============================================================
 export default function App() {
@@ -508,9 +642,36 @@ export default function App() {
   const handleUndo  = ()  => setProgression(p => p.slice(0, -1));
   const handleReset = ()  => { setProgression([]); setView('build'); setEditingIndex(null); };
 
-  const handleValidate    = () => { setEditingIndex(null); setView('final'); };
-  const handleBackToEdit  = () => setView('build');
-  const handleCompose     = () => setView('section');
+  const handleValidate      = () => { setEditingIndex(null); setView('final'); };
+  const handleBackToEdit    = () => setView('build');
+  const handleCompose       = () => setView('section');
+  const handleOpenSpotify   = () => setView('spotify');
+  const handleSpotifyStart  = (chord) => {
+    setProgression([{ root: chord.root, quality: chord.quality, mood: null }]);
+    setView('build');
+  };
+
+  // Handle Spotify OAuth callback (page load after redirect)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code   = params.get('code');
+    const state  = params.get('state');
+    const err    = params.get('error');
+    if (err) { window.history.replaceState({}, '', window.location.pathname); return; }
+    if (code && state && state === localStorage.getItem('spotify_state')) {
+      window.history.replaceState({}, '', window.location.pathname);
+      const cid = getSpotifyClientId();
+      exchangeToken(code, cid).then(data => {
+        if (data.access_token) {
+          localStorage.setItem('spotify_token',        data.access_token);
+          localStorage.setItem('spotify_token_expiry', String(Date.now() + data.expires_in * 1000));
+          localStorage.removeItem('spotify_state');
+          localStorage.removeItem('spotify_verifier');
+          setView('spotify');
+        }
+      }).catch(() => {});
+    }
+  }, []);
 
   // Keyboard shortcut: press A–G to play that chord with the current quality.
   const currentChordRef = useRef(null);
@@ -581,8 +742,10 @@ export default function App() {
       {/* grain overlay */}
       <div className="grain fixed inset-0 pointer-events-none opacity-20 z-[1]" />
 
-      {progression.length === 0 ? (
-        <ChordPicker onSelect={handleStarter} />
+      {view === 'spotify' ? (
+        <SpotifyScreen onStart={handleSpotifyStart} onBack={() => setView('build')} />
+      ) : progression.length === 0 ? (
+        <ChordPicker onSelect={handleStarter} onSpotify={handleOpenSpotify} />
       ) : view === 'section' ? (
         <SectionScreen
           verse={progression}
@@ -630,7 +793,7 @@ export default function App() {
 // ============================================================
 // CHORD PICKER (initial screen)
 // ============================================================
-function ChordPicker({ onSelect }) {
+function ChordPicker({ onSelect, onSpotify }) {
   const [showAll, setShowAll] = useState(false);
 
   return (
@@ -706,6 +869,20 @@ function ChordPicker({ onSelect }) {
             );
           })}
         </div>
+      </div>
+
+      <div className="mt-10 anim-fade" style={{ animationDelay: '750ms' }}>
+        <div className="h-px mb-6" style={{ backgroundColor: '#3a334a', opacity: 0.4 }} />
+        <button
+          onClick={onSpotify}
+          className="f-mono text-[11px] tracking-[0.2em] uppercase flex items-center gap-2 transition-colors"
+          style={{ color: '#968ea0' }}
+          onMouseEnter={(e) => e.currentTarget.style.color = '#1db954'}
+          onMouseLeave={(e) => e.currentTarget.style.color = '#968ea0'}
+        >
+          <span style={{ color: '#1db954' }}>●</span>
+          partir de vos écoutes Spotify
+        </button>
       </div>
     </div>
   );
@@ -1713,6 +1890,198 @@ function SectionScreen({ verse, onBack, onReset }) {
         </button>
       </div>
     </div>
+  );
+}
+
+// ============================================================
+// SPOTIFY SCREEN
+// ============================================================
+function SpotifyScreen({ onStart, onBack }) {
+  const [phase,   setPhase]   = useState('idle');
+  const [inputId, setInputId] = useState(getSpotifyClientId);
+  const [groups,  setGroups]  = useState([]);
+  const [errMsg,  setErrMsg]  = useState('');
+
+  const loadData = async (token) => {
+    setPhase('loading');
+    try {
+      const tracks = await fetchRecentTracks(token);
+      const feats  = await fetchAudioFeatures(token, tracks.map(t => t.id));
+      setGroups(processSpotifyData(tracks, feats));
+      setPhase('ready');
+    } catch (e) {
+      if (e.message === '401') { clearSpotifyAuth(); setPhase('login'); }
+      else { setErrMsg(e.message); setPhase('error'); }
+    }
+  };
+
+  useEffect(() => {
+    const cid   = getSpotifyClientId();
+    const token = getSpotifyToken();
+    if (!cid)  { setPhase('setup'); return; }
+    if (token) { loadData(token);   return; }
+    setPhase('login');
+  }, []);
+
+  const handleSaveId = () => {
+    const id = inputId.trim();
+    localStorage.setItem('spotify_client_id', id);
+    const token = getSpotifyToken();
+    if (token) loadData(token); else setPhase('login');
+  };
+
+  // shared layout wrappers
+  const Wrap  = ({ children }) => (
+    <div className="relative z-10 max-w-2xl mx-auto px-5 sm:px-8 py-8 sm:py-12">{children}</div>
+  );
+  const Header = () => (
+    <div className="mb-6 anim-fade">
+      <div className="text-[10px] tracking-[0.3em] uppercase mb-2 flex items-center gap-3" style={{ color: '#7a7488' }}>
+        <span style={{ color: '#1db954' }}>●</span>
+        <span style={{ opacity: 0.5 }}>écoutes récentes</span>
+        <span className="flex-1 h-px" style={{ backgroundColor: '#3a334a' }} />
+      </div>
+      <h1 className="f-display italic text-2xl sm:text-3xl" style={{ color: '#ede5d8' }}>vos tonalités</h1>
+    </div>
+  );
+  const Footer = ({ extra }) => (
+    <div className="mt-10 pt-6 flex items-center gap-5" style={{ borderTop: '1px solid rgba(58,51,74,0.5)' }}>
+      <button onClick={onBack} className="flex items-center gap-1.5 text-[10px] tracking-[0.2em] uppercase transition-colors" style={{ color: '#968ea0' }}
+        onMouseEnter={e => e.currentTarget.style.color='#ede5d8'}
+        onMouseLeave={e => e.currentTarget.style.color='#968ea0'}>
+        <ArrowLeft className="w-3 h-3" strokeWidth={1.5}/> retour
+      </button>
+      {extra}
+    </div>
+  );
+
+  if (phase === 'setup') return (
+    <Wrap>
+      <Header/>
+      <div className="p-5 rounded-sm anim-fade" style={{ backgroundColor: '#1a1727', border: '1px solid #4a3f5c' }}>
+        <div className="text-[10px] tracking-[0.25em] uppercase mb-4" style={{ color: '#c58aa0' }}>configurer l'intégration</div>
+        <ol className="f-mono text-[11px] leading-loose mb-5 space-y-1" style={{ color: '#968ea0' }}>
+          <li>1. Créer une app sur <span style={{ color: '#ede5d8' }}>developer.spotify.com/dashboard</span></li>
+          <li>2. Ajouter comme Redirect URI&nbsp;: <span style={{ color: '#ede5d8' }}>{spotifyRedirectUri()}</span></li>
+          <li>3. Coller votre <span style={{ color: '#ede5d8' }}>Client ID</span> ci-dessous</li>
+        </ol>
+        <input
+          className="f-mono w-full text-sm px-3 py-2 rounded-sm mb-3 outline-none"
+          style={{ backgroundColor: '#14121c', border: '1px solid #5a526a', color: '#ede5d8' }}
+          placeholder="Client ID (32 caractères hexadécimaux)"
+          value={inputId}
+          onChange={e => setInputId(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && inputId.trim().length > 10 && handleSaveId()}
+        />
+        <button
+          onClick={handleSaveId}
+          disabled={inputId.trim().length < 10}
+          className="f-mono text-[11px] tracking-[0.2em] uppercase px-4 py-2 rounded-sm transition-all"
+          style={{ backgroundColor: '#252237', border: '1px solid #5a526a', color: '#ede5d8', opacity: inputId.trim().length < 10 ? 0.4 : 1, cursor: inputId.trim().length < 10 ? 'not-allowed' : 'pointer' }}
+        >
+          enregistrer
+        </button>
+      </div>
+      <Footer/>
+    </Wrap>
+  );
+
+  if (phase === 'login') return (
+    <Wrap>
+      <Header/>
+      <p className="f-mono text-[11px] leading-relaxed mb-6" style={{ color: '#968ea0' }}>
+        Connectez votre compte Spotify pour enrichir verse avec les tonalités de vos 50 dernières écoutes.
+      </p>
+      <button
+        onClick={() => initiateSpotifyLogin(getSpotifyClientId())}
+        className="f-mono text-[12px] tracking-[0.18em] uppercase px-5 py-3 rounded-sm transition-opacity flex items-center gap-2"
+        style={{ backgroundColor: '#1db954', color: '#000', border: 'none', cursor: 'pointer' }}
+        onMouseEnter={e => e.currentTarget.style.opacity='0.85'}
+        onMouseLeave={e => e.currentTarget.style.opacity='1'}
+      >
+        <span>●</span> Connecter Spotify
+      </button>
+      <button onClick={() => setPhase('setup')} className="block mt-3 text-[10px] tracking-[0.2em] uppercase transition-colors" style={{ color: '#5a526a' }}
+        onMouseEnter={e => e.currentTarget.style.color='#968ea0'}
+        onMouseLeave={e => e.currentTarget.style.color='#5a526a'}>
+        modifier le Client ID
+      </button>
+      <Footer/>
+    </Wrap>
+  );
+
+  if (phase === 'idle' || phase === 'loading') return (
+    <Wrap>
+      <Header/>
+      <p className="f-mono text-[11px]" style={{ color: '#7a7488' }}>chargement de vos écoutes…</p>
+      <Footer/>
+    </Wrap>
+  );
+
+  if (phase === 'error') return (
+    <Wrap>
+      <Header/>
+      <p className="f-mono text-[11px] leading-relaxed mb-3" style={{ color: '#cc7a6e' }}>Erreur : {errMsg}</p>
+      <button onClick={() => { const t = getSpotifyToken(); if (t) loadData(t); else setPhase('login'); }}
+        className="text-[10px] tracking-[0.2em] uppercase transition-colors" style={{ color: '#968ea0' }}
+        onMouseEnter={e => e.currentTarget.style.color='#ede5d8'}
+        onMouseLeave={e => e.currentTarget.style.color='#968ea0'}>
+        réessayer
+      </button>
+      <Footer/>
+    </Wrap>
+  );
+
+  // phase === 'ready'
+  return (
+    <Wrap>
+      <Header/>
+      <p className="f-mono text-[11px] mb-8 leading-relaxed" style={{ color: '#968ea0' }}>
+        Touchez un accord pour démarrer une progression — les suggestions sont dérivées des tonalités de vos écoutes récentes.
+      </p>
+
+      {groups.length === 0 ? (
+        <p className="f-mono text-[11px]" style={{ color: '#7a7488' }}>
+          Pas suffisamment de données tonales dans vos écoutes récentes.
+        </p>
+      ) : (
+        <div className="space-y-12">
+          {groups.map((g, gi) => (
+            <div key={gi} className="anim-fade" style={{ animationDelay: `${gi * 100}ms` }}>
+              {/* key header */}
+              <div className="flex items-baseline gap-3 mb-2">
+                <span className="f-display italic" style={{ fontSize: 'clamp(36px, 9vw, 56px)', color: '#ede5d8' }}>
+                  {g.name}
+                </span>
+                <span className="f-mono text-[10px] tracking-[0.15em] uppercase" style={{ color: '#7a7488' }}>
+                  {g.isMajor ? 'majeure' : 'mineure'} · {g.count} morceau{g.count > 1 ? 'x' : ''}
+                </span>
+              </div>
+              {/* source tracks */}
+              <div className="flex flex-wrap gap-1.5 mb-4">
+                {g.sourceTracks.map((t, ti) => (
+                  <span key={ti} className="f-display italic text-[10px] px-2 py-0.5 rounded-sm"
+                    style={{ color: '#a8a0b8', backgroundColor: '#1d1a28', border: '1px solid #3a334a' }}>
+                    {t.artist} – {t.name}
+                  </span>
+                ))}
+              </div>
+              {/* chord suggestions */}
+              <SuggestionsGrid suggestions={g.suggestions} onSelect={s => onStart({ root: s.root, quality: s.quality })} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      <Footer extra={
+        <button onClick={() => { clearSpotifyAuth(); setPhase('login'); }}
+          className="text-[10px] tracking-[0.2em] uppercase transition-colors" style={{ color: '#968ea0' }}
+          onMouseEnter={e => e.currentTarget.style.color='#cc7a6e'}
+          onMouseLeave={e => e.currentTarget.style.color='#968ea0'}>
+          déconnecter
+        </button>
+      }/>
+    </Wrap>
   );
 }
 
