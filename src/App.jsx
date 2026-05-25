@@ -297,6 +297,79 @@ function scaleRootName(scale, scaleRoot) {
 }
 
 // ============================================================
+// SECTION SUGGESTIONS (refrain / pont)
+// Détecte la tonalité (majeure / mineure) qui colle le mieux à
+// l'ensemble du couplet, puis propose des accords qui s'y marient.
+// ============================================================
+function detectKey(progression) {
+  const candidates = SCALES.filter(s => s.id === 'major' || s.id === 'minor');
+  let best = null;
+  for (const scale of candidates) {
+    for (let root = 0; root < 12; root++) {
+      const diatonic = scaleChords(scale, root);
+      let score = 0;
+      for (const chord of progression) {
+        const q = lookupQuality(chord.quality);
+        if (q === null) continue;
+        if (diatonic.some(dc => dc.root === chord.root && dc.quality === q)) score++;
+      }
+      const last  = progression[progression.length - 1];
+      const first = progression[0];
+      let bonus = 0;
+      if (last  && last.root  === root) bonus += 0.6; // résolution sur la tonique
+      if (first && first.root === root) bonus += 0.3; // départ sur la tonique
+      const total = score + bonus;
+      if (!best || total > best.total) best = { scale, root, total };
+    }
+  }
+  return best;
+}
+
+function makeSuggestion(root, quality, roman, mood, desc) {
+  const r = ((root % 12) + 12) % 12;
+  return { id: `${r}-${quality}-${roman}`, root: r, quality, roman, mood, desc };
+}
+
+function getSectionSuggestions(progression) {
+  const key = detectKey(progression);
+  if (!key) return null;
+  const R = key.root;
+  const isMajor = key.scale.id === 'major';
+
+  let refrain, pont;
+  if (isMajor) {
+    refrain = [
+      makeSuggestion(R + 5, 'maj', 'IV',  'joyful',      'élan — ouvre grand le refrain'),
+      makeSuggestion(R + 7, 'maj', 'V',   'brighter',    'tension lumineuse qui pousse'),
+      makeSuggestion(R + 9, 'min', 'vi',  'melancholic', 'relief — la relative mineure'),
+      makeSuggestion(R,     'maj', 'I',   'joyful',      'ancrage — retour à la maison'),
+      makeSuggestion(R + 2, 'min', 'ii',  'dreamy',      'respiration avant la relance'),
+    ];
+    pont = [
+      makeSuggestion(R + 4,  'min', 'iii',  'darker',   'médiane — contemplation'),
+      makeSuggestion(R + 10, 'maj', 'bVII', 'brighter', 'emprunt modal — bouffée d\'air'),
+      makeSuggestion(R + 8,  'maj', 'bVI',  'darker',   'couleur sombre, cinématique'),
+      makeSuggestion(R + 2,  '7',   'V/V',  'tense',    'dominante secondaire — relance'),
+    ];
+  } else {
+    refrain = [
+      makeSuggestion(R + 8,  'maj', 'VI',  'melancholic', 'chaleur — soulève le refrain'),
+      makeSuggestion(R + 10, 'maj', 'VII', 'brighter',    'lift modal vers la lumière'),
+      makeSuggestion(R + 5,  'min', 'iv',  'darker',      'creuse l\'émotion'),
+      makeSuggestion(R + 3,  'maj', 'III', 'joyful',      'éclaircie — la relative majeure'),
+      makeSuggestion(R,      'min', 'i',   'melancholic', 'ancrage sombre'),
+    ];
+    pont = [
+      makeSuggestion(R + 7, 'maj', 'V',   'tense',  'dominante — tension classique'),
+      makeSuggestion(R + 7, 'min', 'v',   'dreamy', 'suspension modale douce'),
+      makeSuggestion(R + 1, 'maj', 'bII', 'tense',  'napolitaine — couleur dramatique'),
+      makeSuggestion(R + 2, 'min', 'ii',  'darker', 'couleur dorienne, feutrée'),
+    ];
+  }
+  return { key, refrain, pont };
+}
+
+// ============================================================
 // MOODS
 // ============================================================
 const MOODS = {
@@ -437,6 +510,7 @@ export default function App() {
 
   const handleValidate    = () => { setEditingIndex(null); setView('final'); };
   const handleBackToEdit  = () => setView('build');
+  const handleCompose     = () => setView('section');
 
   // Keyboard shortcut: press A–G to play that chord with the current quality.
   const currentChordRef = useRef(null);
@@ -509,11 +583,18 @@ export default function App() {
 
       {progression.length === 0 ? (
         <ChordPicker onSelect={handleStarter} />
+      ) : view === 'section' ? (
+        <SectionScreen
+          verse={progression}
+          onBack={() => setView('final')}
+          onReset={handleReset}
+        />
       ) : view === 'final' ? (
         <FinalScreen
           progression={progression}
           onBack={handleBackToEdit}
           onReset={handleReset}
+          onCompose={handleCompose}
           showGuitar={showGuitar}
           showPiano={showPiano}
           setShowGuitar={setShowGuitar}
@@ -857,8 +938,9 @@ function SuggestionsGrid({ suggestions, onSelect }) {
               <Icon className="w-3 h-3 shrink-0" strokeWidth={1.5} />
               <span className="truncate">{mood.fr}</span>
             </div>
-            <div className="f-mono text-xl sm:text-2xl mb-1 leading-none" style={{ color: '#ede5d8' }}>
-              {chordName(s.root, s.quality)}
+            <div className="f-mono text-xl sm:text-2xl mb-1 leading-none flex items-baseline gap-1.5" style={{ color: '#ede5d8' }}>
+              <span>{chordName(s.root, s.quality)}</span>
+              {s.roman && <span className="text-[10px]" style={{ color: '#7a7488' }}>{s.roman}</span>}
             </div>
             <div className="f-display italic text-[11px] leading-tight mt-1.5" style={{ color: '#7a7488' }}>
               {s.desc}
@@ -1319,7 +1401,7 @@ function ChordSelector({ onSelect, currentChord }) {
 // ============================================================
 // FINAL SCREEN (suite validée)
 // ============================================================
-function FinalScreen({ progression, onBack, onReset, showGuitar, showPiano, setShowGuitar, setShowPiano }) {
+function FinalScreen({ progression, onBack, onReset, onCompose, showGuitar, showPiano, setShowGuitar, setShowPiano }) {
   return (
     <div className="relative z-10 max-w-3xl mx-auto px-5 sm:px-8 py-8 sm:py-12">
       {/* header */}
@@ -1359,8 +1441,20 @@ function FinalScreen({ progression, onBack, onReset, showGuitar, showPiano, setS
         ))}
       </div>
 
+      {/* compose a refrain / bridge */}
+      <button
+        onClick={onCompose}
+        className="mt-10 w-full f-mono text-[11px] tracking-[0.25em] uppercase py-3 rounded-sm transition-all flex items-center justify-center gap-2 anim-fade"
+        style={{ color: '#ede5d8', backgroundColor: '#252237', border: '1px solid #5a526a' }}
+        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#2e2a40'; e.currentTarget.style.borderColor = '#7a6f92'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#252237'; e.currentTarget.style.borderColor = '#5a526a'; }}
+      >
+        <Sparkles className="w-3.5 h-3.5" strokeWidth={1.5} />
+        composer un refrain / un pont
+      </button>
+
       {/* footer actions */}
-      <div className="mt-12 pt-6 flex items-center gap-5" style={{ borderTop: '1px solid rgba(58, 51, 74, 0.5)' }}>
+      <div className="mt-8 pt-6 flex items-center gap-5" style={{ borderTop: '1px solid rgba(58, 51, 74, 0.5)' }}>
         <button
           onClick={onBack}
           className="flex items-center gap-1.5 text-[10px] tracking-[0.2em] uppercase transition-colors"
@@ -1463,6 +1557,161 @@ function ChordCard({ chord, index, showGuitar, showPiano, delay }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================
+// SECTION SCREEN (refrain / pont — accords qui se marient au couplet)
+// ============================================================
+function SectionScreen({ verse, onBack, onReset }) {
+  const data = useMemo(() => getSectionSuggestions(verse), [verse]);
+  const [section, setSection] = useState([]);
+
+  const handlePick = (s) => {
+    playChord(s.root, s.quality);
+    setSection(p => [...p, { root: s.root, quality: s.quality }]);
+  };
+  const focused = section[section.length - 1];
+
+  const keyName = data ? scaleRootName(data.key.scale, data.key.root) : '';
+  const keyKind = data ? (data.key.scale.id === 'major' ? 'majeure' : 'mineure') : '';
+
+  return (
+    <div className="relative z-10 max-w-2xl mx-auto px-5 sm:px-8 py-8 sm:py-12">
+      {/* header */}
+      <div className="mb-6 anim-fade">
+        <div className="text-[10px] tracking-[0.3em] uppercase mb-2 flex items-center gap-3" style={{ color: '#7a7488' }}>
+          <span>· suite ·</span>
+          <span style={{ opacity: 0.5 }}>refrain / pont</span>
+          <span className="flex-1 h-px" style={{ backgroundColor: '#3a334a' }} />
+        </div>
+        <h1 className="f-display italic text-2xl sm:text-3xl" style={{ color: '#ede5d8' }}>et maintenant&nbsp;?</h1>
+        {data && (
+          <p className="f-mono text-[11px] mt-2 tracking-wide leading-relaxed" style={{ color: '#968ea0' }}>
+            des accords qui se marient avec votre couplet en{' '}
+            <span style={{ color: '#ede5d8' }}>{keyName} {keyKind}</span>
+          </p>
+        )}
+      </div>
+
+      {/* verse recap */}
+      <div className="mb-6">
+        <div className="text-[10px] tracking-[0.25em] uppercase mb-2" style={{ color: '#7a7488' }}>votre couplet</div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+          {verse.map((c, i) => (
+            <span
+              key={i}
+              className="f-mono text-sm px-2 py-1 rounded-sm"
+              style={{ color: '#a8a0b8', backgroundColor: '#1d1a28', border: '1px solid #3a334a' }}
+            >
+              {chordName(c.root, c.quality)}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* section being assembled */}
+      {section.length > 0 && (
+        <div className="mb-6 anim-fade">
+          <div className="text-[10px] tracking-[0.25em] uppercase mb-2 flex items-center gap-3" style={{ color: '#c58aa0' }}>
+            <span>votre nouvelle partie</span>
+            <span className="flex-1 h-px" style={{ backgroundColor: '#3a334a', opacity: 0.5 }} />
+          </div>
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            {section.map((c, i) => (
+              <span
+                key={i}
+                className="f-mono text-base px-2.5 py-1.5 rounded-sm"
+                style={{ color: '#ede5d8', backgroundColor: '#252237', border: '1px solid #5a526a' }}
+              >
+                {chordName(c.root, c.quality)}
+              </span>
+            ))}
+          </div>
+          {focused && (
+            <div className="flex flex-wrap items-start justify-center gap-6 sm:gap-10 py-2">
+              <div className="flex flex-col items-center">
+                <GuitarDiagram chord={focused} />
+                <div className="f-mono text-[9px] tracking-[0.25em] uppercase mt-2" style={{ color: '#7a7488' }}>guitare</div>
+              </div>
+              <div className="flex flex-col items-center">
+                <PianoDiagram chord={focused} />
+                <div className="f-mono text-[9px] tracking-[0.25em] uppercase mt-2" style={{ color: '#7a7488' }}>piano</div>
+              </div>
+            </div>
+          )}
+          <div className="flex items-center gap-4 mt-1">
+            <button
+              onClick={() => setSection(p => p.slice(0, -1))}
+              className="flex items-center gap-1.5 text-[10px] tracking-[0.2em] uppercase transition-colors"
+              style={{ color: '#968ea0' }}
+              onMouseEnter={(e) => e.currentTarget.style.color = '#ede5d8'}
+              onMouseLeave={(e) => e.currentTarget.style.color = '#968ea0'}
+            >
+              <Undo2 className="w-3 h-3" strokeWidth={1.5} /> retour
+            </button>
+            <button
+              onClick={() => setSection([])}
+              className="flex items-center gap-1.5 text-[10px] tracking-[0.2em] uppercase transition-colors"
+              style={{ color: '#968ea0' }}
+              onMouseEnter={(e) => e.currentTarget.style.color = '#ede5d8'}
+              onMouseLeave={(e) => e.currentTarget.style.color = '#968ea0'}
+            >
+              <RotateCcw className="w-3 h-3" strokeWidth={1.5} /> vider
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* proposals */}
+      {data ? (
+        <>
+          <div className="mb-6">
+            <div className="text-[10px] tracking-[0.25em] uppercase mb-3 flex items-center gap-3" style={{ color: '#7a7488' }}>
+              <span>pour lancer un refrain</span>
+              <span className="flex-1 h-px" style={{ backgroundColor: '#3a334a', opacity: 0.5 }} />
+            </div>
+            <SuggestionsGrid suggestions={data.refrain} onSelect={handlePick} />
+          </div>
+          <div className="mb-2">
+            <div className="text-[10px] tracking-[0.25em] uppercase mb-3 flex items-center gap-3" style={{ color: '#7a7488' }}>
+              <span>pour un pont / du contraste</span>
+              <span className="flex-1 h-px" style={{ backgroundColor: '#3a334a', opacity: 0.5 }} />
+            </div>
+            <SuggestionsGrid suggestions={data.pont} onSelect={handlePick} />
+          </div>
+          <p className="f-mono text-[10px] mt-4 tracking-wide leading-relaxed" style={{ color: '#5a526a' }}>
+            touchez un accord pour l'entendre — il s'ajoute à votre nouvelle partie
+          </p>
+        </>
+      ) : (
+        <p className="f-mono text-[11px] leading-relaxed" style={{ color: '#7a7488' }}>
+          tonalité trop ambiguë pour proposer des accords (couplet uniquement suspendu&nbsp;?).
+        </p>
+      )}
+
+      {/* footer */}
+      <div className="mt-10 pt-6 flex items-center gap-5" style={{ borderTop: '1px solid rgba(58, 51, 74, 0.5)' }}>
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1.5 text-[10px] tracking-[0.2em] uppercase transition-colors"
+          style={{ color: '#968ea0' }}
+          onMouseEnter={(e) => e.currentTarget.style.color = '#ede5d8'}
+          onMouseLeave={(e) => e.currentTarget.style.color = '#968ea0'}
+        >
+          <ArrowLeft className="w-3 h-3" strokeWidth={1.5} /> retour au couplet
+        </button>
+        <button
+          onClick={onReset}
+          className="flex items-center gap-1.5 text-[10px] tracking-[0.2em] uppercase transition-colors"
+          style={{ color: '#968ea0' }}
+          onMouseEnter={(e) => e.currentTarget.style.color = '#ede5d8'}
+          onMouseLeave={(e) => e.currentTarget.style.color = '#968ea0'}
+        >
+          <RotateCcw className="w-3 h-3" strokeWidth={1.5} /> recommencer
+        </button>
+      </div>
     </div>
   );
 }
