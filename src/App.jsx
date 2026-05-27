@@ -13,7 +13,7 @@ function chordName(root, quality) {
   const note = isMinor ? NOTE_MINOR[r] : NOTE_MAJOR[r];
   const suffix = {
     maj: '', min: 'm', '7': '7', maj7: 'maj7', m7: 'm7',
-    sus2: 'sus2', sus4: 'sus4', dim: '°', aug: '+',
+    sus: 'sus', sus2: 'sus2', sus4: 'sus4', dim: '°', aug: '+',
   }[quality] || '';
   return note + suffix;
 }
@@ -27,6 +27,7 @@ const CHORD_INTERVALS = {
   '7':  [0, 4, 7, 10],
   maj7: [0, 4, 7, 11],
   m7:   [0, 3, 7, 10],
+  sus:  [0, 5, 7],
   sus2: [0, 2, 7],
   sus4: [0, 5, 7],
 };
@@ -48,6 +49,7 @@ const OPEN_CHORDS = {
   '0-maj':  { frets: [-1, 3, 2, 0, 1, 0], barre: 0 },
   '0-7':    { frets: [-1, 3, 2, 3, 1, 0], barre: 0 },
   '0-maj7': { frets: [-1, 3, 2, 0, 0, 0], barre: 0 },
+  '0-sus':  { frets: [-1, 3, 3, 0, 1, 1], barre: 0 },
   '0-sus2': { frets: [-1, 3, 0, 0, 1, 3], barre: 0 },
   '0-sus4': { frets: [-1, 3, 3, 0, 1, 1], barre: 0 },
 
@@ -57,10 +59,12 @@ const OPEN_CHORDS = {
   '2-7':    { frets: [-1, -1, 0, 2, 1, 2], barre: 0 },
   '2-maj7': { frets: [-1, -1, 0, 2, 2, 2], barre: 0 },
   '2-m7':   { frets: [-1, -1, 0, 2, 1, 1], barre: 0 },
+  '2-sus':  { frets: [-1, -1, 0, 2, 3, 3], barre: 0 },
   '2-sus2': { frets: [-1, -1, 0, 2, 3, 0], barre: 0 },
   '2-sus4': { frets: [-1, -1, 0, 2, 3, 3], barre: 0 },
 
-  // E sus2 (voicing ouvert idiomatique)
+  // E family
+  '4-sus':  { frets: [0, 2, 2, 2, 0, 0], barre: 0 },
   '4-sus2': { frets: [0, 2, 4, 4, 0, 0], barre: 0 },
 
   // F maj7 ouvert
@@ -70,6 +74,7 @@ const OPEN_CHORDS = {
   '7-maj':  { frets: [3, 2, 0, 0, 0, 3], barre: 0 },
   '7-7':    { frets: [3, 2, 0, 0, 0, 1], barre: 0 },
   '7-maj7': { frets: [3, 2, 0, 0, 0, 2], barre: 0 },
+  '7-sus':  { frets: [3, 3, 0, 0, 1, 3], barre: 0 },
   '7-sus2': { frets: [3, 0, 0, 0, 3, 3], barre: 0 },
   '7-sus4': { frets: [3, 3, 0, 0, 1, 3], barre: 0 },
 
@@ -86,8 +91,8 @@ const BARRE_SHAPES = {
     '7':  [0, 2, 0, 1, 0, 0],
     maj7: [0, 2, 1, 1, 0, 0],
     m7:   [0, 2, 0, 0, 0, 0],
+    sus:  [0, 2, 2, 2, 0, 0],
     sus4: [0, 2, 2, 2, 0, 0],
-    // sus2 délicat sur E-shape → A-shape s'en charge
   },
   // A-shape (fondamentale sur La)
   A: {
@@ -96,6 +101,7 @@ const BARRE_SHAPES = {
     '7':  [-1, 0, 2, 0, 2, 0],
     maj7: [-1, 0, 2, 1, 2, 0],
     m7:   [-1, 0, 2, 0, 1, 0],
+    sus:  [-1, 0, 2, 2, 3, 0],
     sus2: [-1, 0, 2, 2, 0, 0],
     sus4: [-1, 0, 2, 2, 3, 0],
   },
@@ -195,6 +201,14 @@ const RULES = {
     { offset: 7,  quality: 'maj',  mood: 'brighter',    desc: 'V — sans résoudre' },
     { offset: 5,  quality: 'maj',  mood: 'joyful',      desc: 'IV' },
     { offset: 9,  quality: 'min',  mood: 'melancholic', desc: 'vi' },
+  ],
+  sus: [
+    { offset: 0,  quality: 'maj',  mood: 'joyful',      desc: 'résolution majeure — classique' },
+    { offset: 0,  quality: 'min',  mood: 'melancholic', desc: 'résolution mineure — plus sombre' },
+    { offset: 5,  quality: 'maj',  mood: 'joyful',      desc: 'IV — élan' },
+    { offset: 7,  quality: 'maj',  mood: 'brighter',    desc: 'V — tension directe' },
+    { offset: 7,  quality: 'sus',  mood: 'dreamy',      desc: 'Vsus — suspension enchaînée' },
+    { offset: -5, quality: 'maj',  mood: 'melancholic', desc: 'I de la tonalité basse' },
   ],
   sus4: [
     { offset: 0,  quality: 'maj',  mood: 'joyful',      desc: 'résolution majeure (classique)' },
@@ -420,12 +434,14 @@ const COMMON_STARTERS = [
   { root: 2,  quality: 'min' }, // Dm
   { root: 11, quality: 'min' }, // Bm
   { root: 5,  quality: 'maj' }, // F
+  { root: 2,  quality: 'sus'  }, // Dsus
+  { root: 9,  quality: 'sus'  }, // Asus
 ];
 
-const ALL_QUALITIES = ['maj', 'min', '7', 'maj7', 'm7', 'sus2', 'sus4'];
+const ALL_QUALITIES = ['maj', 'min', '7', 'maj7', 'm7', 'sus', 'sus2', 'sus4'];
 const QUALITY_LABELS = {
   maj: 'majeur', min: 'mineur', '7': 'dom. 7',
-  maj7: 'maj7', m7: 'm7', sus2: 'sus2', sus4: 'sus4',
+  maj7: 'maj7', m7: 'm7', sus: 'sus', sus2: 'sus2', sus4: 'sus4',
 };
 
 // ============================================================
