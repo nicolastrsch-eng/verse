@@ -290,6 +290,31 @@ function scaleChords(scale, scaleRoot) {
   }));
 }
 
+// Retourne toutes les gammes (scale × root) qui contiennent TOUS les accords
+// de la progression (les accords sus, ambigus, sont ignorés pour le filtre).
+// Chaque résultat porte un tableau `degrees` : l'index dans la gamme de chaque
+// accord de la progression (dans l'ordre, après exclusion des sus).
+function findScalesForProgression(progression) {
+  const matchable = progression.filter(c => lookupQuality(c.quality) !== null);
+  if (matchable.length === 0) return [];
+  const results = [];
+  for (const scale of SCALES) {
+    for (let scaleRoot = 0; scaleRoot < 12; scaleRoot++) {
+      const diatonic = scaleChords(scale, scaleRoot);
+      const degrees  = [];
+      let   allMatch = true;
+      for (const chord of matchable) {
+        const tq  = lookupQuality(chord.quality);
+        const deg = diatonic.findIndex(dc => dc.root === chord.root && dc.quality === tq);
+        if (deg === -1) { allMatch = false; break; }
+        degrees.push(deg);
+      }
+      if (allMatch) results.push({ scale, scaleRoot, degrees });
+    }
+  }
+  return results;
+}
+
 function scaleRootName(scale, scaleRoot) {
   // Côté majeur (maj, lyd, mix) → bémols ; côté mineur (toutes les autres) → dièses.
   const sharps = ['minor','dorian','phrygian','harm_min','mel_min'].includes(scale.id);
@@ -1094,6 +1119,7 @@ function BuildScreen({ progression, currentChord, suggestions, editingIndex,
       {/* diagrammes guitare / piano / gammes */}
       <ChordDiagrams
         chord={focusedChord}
+        progression={progression}
         showGuitar={showGuitar}
         showPiano={showPiano}
         showScales={showScales}
@@ -1349,7 +1375,7 @@ function Controls({ onUndo, onReset, canUndo }) {
 // ============================================================
 // CHORD DIAGRAMS (guitare + piano)
 // ============================================================
-function ChordDiagrams({ chord, showGuitar, showPiano, showScales,
+function ChordDiagrams({ chord, progression, showGuitar, showPiano, showScales,
                          setShowGuitar, setShowPiano, setShowScales, onAddChord }) {
   const both = showGuitar && showPiano;
   const any  = showGuitar || showPiano;
@@ -1389,7 +1415,7 @@ function ChordDiagrams({ chord, showGuitar, showPiano, showScales,
       )}
 
       {hasScales && showScales && (
-        <ScalesPanel chord={chord} onAdd={onAddChord} />
+        <ScalesPanel chord={chord} progression={progression} onAdd={onAddChord} />
       )}
     </div>
   );
@@ -2427,38 +2453,51 @@ function HooktheoryPanel({ progression, onAdd }) {
 }
 
 // ============================================================
-// SCALES PANEL (toutes les gammes contenant l'accord en cours)
+// SCALES PANEL (gammes contenant TOUS les accords de la progression)
 // ============================================================
-function ScalesPanel({ chord, onAdd }) {
-  const results = useMemo(
-    () => findContainingScales(chord),
-    [chord.root, chord.quality]
-  );
+function ScalesPanel({ chord, progression, onAdd }) {
+  // N'inclut que les accords dont la qualité est identifiable (pas sus)
+  const matchable = (progression || []).filter(c => lookupQuality(c.quality) !== null);
+  const progKey   = matchable.map(c => `${c.root}-${c.quality}`).join(',');
+
+  const results = useMemo(() => {
+    if (matchable.length > 0) {
+      return findScalesForProgression(matchable);
+    }
+    // Fallback : accord seul (ne devrait pas arriver en pratique)
+    return findContainingScales(chord).map(r => ({ ...r, degrees: [r.degree] }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progKey, chord.root, chord.quality]);
 
   if (results.length === 0) {
     return (
       <div className="mt-6 text-center anim-fade">
         <p className="f-mono text-[11px] leading-relaxed" style={{ color: '#7a7488' }}>
-          pas de lecture diatonique directe<br />
-          (accord suspendu — ambigu modalement)
+          {matchable.length > 0
+            ? 'aucune gamme diatonique ne contient tous les accords de la progression'
+            : 'pas de lecture diatonique directe (accord sus — ambigu modalement)'}
         </p>
       </div>
     );
   }
 
-  // Regrouper par type de gamme tout en préservant l'ordre canonique
-  // défini dans SCALES.
+  // Regrouper par type de gamme en préservant l'ordre canonique de SCALES
   const grouped = [];
   for (const r of results) {
     let g = grouped.find(x => x.scale.id === r.scale.id);
     if (!g) { g = { scale: r.scale, occurrences: [] }; grouped.push(g); }
-    g.occurrences.push({ scaleRoot: r.scaleRoot, degree: r.degree });
+    g.occurrences.push({ scaleRoot: r.scaleRoot, degrees: r.degrees });
   }
+
+  const n = results.length;
+  const label = matchable.length > 1
+    ? `${n} gamme${n > 1 ? 's' : ''} contien${n > 1 ? 'nent' : 't'} toute la progression`
+    : `cet accord apparaît dans ${n} gamme${n > 1 ? 's' : ''}`;
 
   return (
     <div className="mt-6 anim-fade">
       <div className="text-[10px] tracking-[0.25em] uppercase mb-4 flex items-center gap-3" style={{ color: '#7a7488' }}>
-        <span>cet accord apparaît dans {results.length} gammes</span>
+        <span>{label}</span>
         <span className="flex-1 h-px" style={{ backgroundColor: '#3a334a', opacity: 0.5 }} />
       </div>
       <div className="space-y-5">
@@ -2467,8 +2506,7 @@ function ScalesPanel({ chord, onAdd }) {
             key={scale.id}
             scale={scale}
             occurrences={occurrences}
-            highlightRoot={chord.root}
-            highlightQuality={chord.quality}
+            matchable={matchable}
             onAdd={onAdd}
           />
         ))}
@@ -2477,7 +2515,7 @@ function ScalesPanel({ chord, onAdd }) {
   );
 }
 
-function ScaleGroup({ scale, occurrences, highlightRoot, highlightQuality, onAdd }) {
+function ScaleGroup({ scale, occurrences, matchable, onAdd }) {
   return (
     <div>
       <div className="flex items-baseline gap-2 mb-2">
@@ -2494,9 +2532,8 @@ function ScaleGroup({ scale, occurrences, highlightRoot, highlightQuality, onAdd
             key={`${scale.id}-${occ.scaleRoot}`}
             scale={scale}
             scaleRoot={occ.scaleRoot}
-            degree={occ.degree}
-            highlightRoot={highlightRoot}
-            highlightQuality={highlightQuality}
+            degrees={occ.degrees}
+            matchable={matchable}
             onAdd={onAdd}
           />
         ))}
@@ -2505,10 +2542,14 @@ function ScaleGroup({ scale, occurrences, highlightRoot, highlightQuality, onAdd
   );
 }
 
-function ScaleRow({ scale, scaleRoot, degree, highlightRoot, highlightQuality, onAdd }) {
-  const chords     = scaleChords(scale, scaleRoot);
-  const rootName   = scaleRootName(scale, scaleRoot);
-  const targetQual = lookupQuality(highlightQuality);
+function ScaleRow({ scale, scaleRoot, degrees, matchable, onAdd }) {
+  const chords   = scaleChords(scale, scaleRoot);
+  const rootName = scaleRootName(scale, scaleRoot);
+
+  // Construit un Set des paires "root-quality" de la progression pour la mise en surbrillance
+  const highlightSet = new Set(
+    (matchable || []).map(pc => `${pc.root}-${lookupQuality(pc.quality)}`)
+  );
 
   return (
     <div className="p-2.5 rounded-sm" style={{ backgroundColor: '#1a1727', border: '1px solid #3a334a' }}>
@@ -2520,19 +2561,20 @@ function ScaleRow({ scale, scaleRoot, degree, highlightRoot, highlightQuality, o
           {scale.short}
         </span>
         <span className="flex-1" />
+        {/* Degrés romains de chaque accord de la progression dans cette gamme */}
         <span className="f-mono text-[9px] tracking-[0.18em] uppercase" style={{ color: '#c58aa0' }}>
-          → {scale.romans[degree]}
+          {degrees.map(d => scale.romans[d]).join(' · ')}
         </span>
       </div>
       <div className="overflow-x-auto -mx-0.5">
         <div className="flex gap-1 px-0.5" style={{ minWidth: 'max-content' }}>
           {chords.map((c, i) => {
-            const isHighlight = c.root === highlightRoot && c.quality === targetQual;
+            const isHighlight = highlightSet.has(`${c.root}-${c.quality}`);
             const canAdd      = c.quality === 'maj' || c.quality === 'min';
             return (
               <button
                 key={i}
-                onClick={canAdd ? () => onAdd({ root: c.root, quality: c.quality }) : undefined}
+                onClick={canAdd ? () => { playChord(c.root, c.quality); onAdd({ root: c.root, quality: c.quality }); } : undefined}
                 disabled={!canAdd}
                 className="f-mono py-1.5 px-2 rounded-sm flex flex-col items-center transition-all"
                 style={{
@@ -2547,6 +2589,7 @@ function ScaleRow({ scale, scaleRoot, degree, highlightRoot, highlightQuality, o
                     e.currentTarget.style.borderColor = '#6a5e80';
                     e.currentTarget.style.backgroundColor = '#252237';
                   }
+                  if (canAdd) playChord(c.root, c.quality);
                 }}
                 onMouseLeave={(e) => {
                   if (canAdd && !isHighlight) {
