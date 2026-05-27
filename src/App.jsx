@@ -1058,6 +1058,7 @@ function BuildScreen({ progression, currentChord, suggestions, editingIndex,
     () => prevChord ? getSuggestions(prevChord) : [],
     [prevChord && prevChord.root, prevChord && prevChord.quality]
   );
+  const [showCustomPicker, setShowCustomPicker] = useState(false);
 
   return (
     <div className="relative z-10 max-w-2xl mx-auto px-5 sm:px-8 py-8 sm:py-12">
@@ -1122,6 +1123,25 @@ function BuildScreen({ progression, currentChord, suggestions, editingIndex,
           </div>
           <SuggestionsGrid suggestions={suggestions} onSelect={onSuggestion} />
           <HooktheoryPanel progression={progression} onAdd={onAddChord} />
+
+          {/* free chord picker */}
+          <div className="mt-6 pt-5" style={{ borderTop: '1px solid rgba(58,51,74,0.4)' }}>
+            <button
+              onClick={() => setShowCustomPicker(s => !s)}
+              className="flex items-center gap-2 text-[10px] tracking-[0.2em] uppercase transition-colors"
+              style={{ color: showCustomPicker ? '#ede5d8' : '#7a7488' }}
+              onMouseEnter={e => e.currentTarget.style.color = '#ede5d8'}
+              onMouseLeave={e => e.currentTarget.style.color = showCustomPicker ? '#ede5d8' : '#7a7488'}
+            >
+              <span className="f-mono" style={{ fontSize: 13, lineHeight: 1 }}>{showCustomPicker ? '−' : '+'}</span>
+              choisir un accord librement
+            </button>
+            {showCustomPicker && (
+              <CustomChordPicker
+                onSelect={c => { onAddChord(c); setShowCustomPicker(false); }}
+              />
+            )}
+          </div>
         </div>
       )}
 
@@ -1233,6 +1253,67 @@ function SuggestionsGrid({ suggestions, onSelect }) {
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// ============================================================
+// CUSTOM CHORD PICKER (ajout libre d'un accord)
+// ============================================================
+function CustomChordPicker({ onSelect }) {
+  const [quality, setQuality] = useState('maj');
+
+  return (
+    <div className="mt-4 anim-fade">
+      {/* quality selector */}
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {ALL_QUALITIES.map(q => {
+          const sel = quality === q;
+          return (
+            <button
+              key={q}
+              onClick={() => setQuality(q)}
+              className="f-mono text-[10px] px-2.5 py-1 rounded-sm tracking-[0.12em] uppercase transition-all"
+              style={{
+                backgroundColor: sel ? '#3a2f4a' : '#1d1a28',
+                color:           sel ? '#ede5d8' : '#968ea0',
+                border:         `1px solid ${sel ? '#6a5e80' : '#3a334a'}`,
+              }}
+            >
+              {QUALITY_LABELS[q]}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 12 notes */}
+      <div className="grid grid-cols-4 sm:grid-cols-6 gap-1.5">
+        {Array.from({ length: 12 }, (_, root) => {
+          const name = chordName(root, quality);
+          return (
+            <button
+              key={root}
+              onClick={() => { playChord(root, quality); onSelect({ root, quality }); }}
+              className="f-mono text-sm py-3 rounded-sm transition-all"
+              style={{ color: '#ede5d8', backgroundColor: '#1d1a28', border: '1px solid #3a334a' }}
+              onMouseEnter={e => {
+                e.currentTarget.style.borderColor = '#6a5e80';
+                e.currentTarget.style.backgroundColor = '#252237';
+                playChord(root, quality);
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.borderColor = '#3a334a';
+                e.currentTarget.style.backgroundColor = '#1d1a28';
+              }}
+            >
+              {name}
+            </button>
+          );
+        })}
+      </div>
+      <p className="f-mono text-[10px] mt-2 tracking-wide" style={{ color: '#5a526a' }}>
+        passez la souris pour écouter · cliquez pour ajouter
+      </p>
     </div>
   );
 }
