@@ -9,11 +9,13 @@ const NOTE_MINOR = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", 
 
 function chordName(root, quality) {
   const r = ((root % 12) + 12) % 12;
-  const isMinor = quality === 'min' || quality === 'm7';
+  const isMinor = ['min', 'm7', 'm6', 'm7b5', 'dim', 'dim7'].includes(quality);
   const note = isMinor ? NOTE_MINOR[r] : NOTE_MAJOR[r];
   const suffix = {
     maj: '', min: 'm', '7': '7', maj7: 'maj7', m7: 'm7',
-    sus: 'sus', sus2: 'sus2', sus4: 'sus4', dim: '°', aug: '+',
+    '6': '6', m6: 'm6', add9: 'add9', m7b5: 'm7♭5',
+    sus: 'sus', sus2: 'sus2', sus4: 'sus4',
+    dim: '°', dim7: '°7', aug: '+',
   }[quality] || '';
   return note + suffix;
 }
@@ -27,9 +29,16 @@ const CHORD_INTERVALS = {
   '7':  [0, 4, 7, 10],
   maj7: [0, 4, 7, 11],
   m7:   [0, 3, 7, 10],
+  '6':  [0, 4, 7, 9],
+  m6:   [0, 3, 7, 9],
+  add9: [0, 4, 7, 2],
+  m7b5: [0, 3, 6, 10],
   sus:  [0, 5, 7],
   sus2: [0, 2, 7],
   sus4: [0, 5, 7],
+  dim:  [0, 3, 6],
+  dim7: [0, 3, 6, 9],
+  aug:  [0, 4, 8],
 };
 
 function chordNotes(root, quality) {
@@ -91,6 +100,9 @@ const BARRE_SHAPES = {
     '7':  [0, 2, 0, 1, 0, 0],
     maj7: [0, 2, 1, 1, 0, 0],
     m7:   [0, 2, 0, 0, 0, 0],
+    '6':  [0, 2, 2, 1, 2, 0],
+    m6:   [0, 2, 2, 0, 2, 0],
+    add9: [0, 2, 2, 1, 0, 2],
     sus:  [0, 2, 2, 2, 0, 0],
     sus4: [0, 2, 2, 2, 0, 0],
   },
@@ -101,6 +113,9 @@ const BARRE_SHAPES = {
     '7':  [-1, 0, 2, 0, 2, 0],
     maj7: [-1, 0, 2, 1, 2, 0],
     m7:   [-1, 0, 2, 0, 1, 0],
+    '6':  [-1, 0, 2, 2, 2, 2],
+    m6:   [-1, 0, 2, 2, 1, 2],
+    m7b5: [-1, 0, 1, 0, 1, -1],
     sus:  [-1, 0, 2, 2, 3, 0],
     sus2: [-1, 0, 2, 2, 0, 0],
     sus4: [-1, 0, 2, 2, 3, 0],
@@ -274,9 +289,10 @@ const SCALES = [
 // pour la recherche dans les gammes (les 7/maj7/m7 contiennent
 // déjà la triade).
 function lookupQuality(quality) {
-  if (quality === 'maj' || quality === 'maj7' || quality === '7') return 'maj';
-  if (quality === 'min' || quality === 'm7')                       return 'min';
-  return null; // sus2 / sus4 sont ambigus
+  if (['maj', 'maj7', '7', '6', 'add9'].includes(quality)) return 'maj';
+  if (['min', 'm7', 'm6'].includes(quality))               return 'min';
+  if (['dim', 'dim7', 'm7b5'].includes(quality))           return 'dim';
+  return null; // sus2 / sus4 / aug sont ambigus
 }
 
 function findContainingScales(chord) {
@@ -409,6 +425,122 @@ function getSectionSuggestions(progression) {
 }
 
 // ============================================================
+// CONTEXT-AWARE SUGGESTIONS
+// L'accord suivant est proposé en fonction de TOUTE la progression :
+// on détecte la tonalité qui colle le mieux à l'ensemble des accords
+// déjà choisis, puis on propose en priorité les accords diatoniques de
+// cette tonalité (garantis consonants avec l'ensemble), ordonnés selon
+// les tendances fonctionnelles réelles depuis le dernier accord.
+//
+// Sources des poids (tendances « accord suivant ») :
+//  · Analyse Markov Hooktheory sur 1300 chansons (I 18,9 % / IV 17,2 % ;
+//    après I → IV 46 % / V 26 % / vi ; après V → I 32 % / vi 29 % / IV 25 %)
+//  · Carte d'harmonie fonctionnelle T → PD → D → T (Berklee / pratique commune)
+//  · Cadences mineures usuelles : i-VI-VII, i-iv-V, andalouse i-VII-VI-V, iiø-V-i
+// ============================================================
+
+// degré (0-6) → liste [degré_suivant, poids] triée par poids décroissant.
+const MAJOR_NEXT = {
+  0: [[3, 1.00], [4, 0.92], [5, 0.78], [1, 0.60], [2, 0.40]], // I  → IV V vi ii iii
+  1: [[4, 0.95], [3, 0.45], [6, 0.40], [0, 0.35], [5, 0.30]], // ii → V IV vii° I vi
+  2: [[5, 0.82], [3, 0.62], [1, 0.42], [0, 0.35]],            // iii→ vi IV ii I
+  3: [[4, 0.90], [0, 0.80], [1, 0.50], [5, 0.42]],            // IV → V I ii vi
+  4: [[0, 0.95], [5, 0.72], [3, 0.48], [1, 0.30]],            // V  → I vi IV ii
+  5: [[3, 0.85], [1, 0.72], [4, 0.60], [0, 0.45], [2, 0.38]], // vi → IV ii V I iii
+  6: [[0, 0.95], [2, 0.40]],                                  // vii°→ I iii
+};
+const MINOR_NEXT = {
+  0: [[5, 0.88], [3, 0.85], [6, 0.82], [4, 0.78], [2, 0.60]], // i  → VI iv VII V III
+  1: [[4, 0.92], [0, 0.45]],                                  // iiø→ V i
+  2: [[5, 0.82], [6, 0.62], [3, 0.50], [0, 0.40]],            // III→ VI VII iv i
+  3: [[4, 0.85], [0, 0.72], [6, 0.60], [2, 0.42]],            // iv → V i VII III
+  4: [[0, 0.95], [5, 0.72]],                                  // V  → i VI
+  5: [[6, 0.85], [3, 0.62], [2, 0.55], [4, 0.50], [0, 0.42]], // VI → VII iv III V i
+  6: [[2, 0.80], [0, 0.72], [5, 0.55]],                       // VII→ III i VI
+};
+
+const MAJOR_DESC = {
+  0: 'I — ancrage, retour à la maison',
+  1: 'ii — respiration jazzée avant la relance',
+  2: 'iii — médiane contemplative',
+  3: 'IV — chaleur, ouvre l\'espace',
+  4: 'V — tension lumineuse qui pousse',
+  5: 'vi — relative mineure, doux-amer',
+  6: 'vii° — instable, appelle le retour à I',
+};
+const MINOR_DESC = {
+  0: 'i — ancrage sombre',
+  1: 'iiø — pré-dominante tendue',
+  2: 'III — relative majeure, éclaircie',
+  3: 'iv — creuse l\'émotion',
+  4: 'V — dominante, tension classique',
+  5: 'VI — chaleur mélancolique',
+  6: 'VII — lift modal vers la lumière',
+};
+const MAJOR_MOOD = { 0: 'joyful', 1: 'dreamy', 2: 'darker', 3: 'joyful', 4: 'brighter', 5: 'melancholic', 6: 'tense' };
+const MINOR_MOOD = { 0: 'melancholic', 1: 'tense', 2: 'joyful', 3: 'darker', 4: 'tense', 5: 'melancholic', 6: 'brighter' };
+
+// Accords « couleur » empruntés, idiomatiques et consonants avec l'ensemble.
+function colorChords(key) {
+  const R = key.root;
+  if (key.scale.id === 'major') {
+    return [
+      makeSuggestion((R + 10) % 12, 'maj', 'bVII', 'brighter',    'bVII — emprunt mixolydien, air frais'),
+      makeSuggestion((R + 5)  % 12, 'min', 'iv',   'melancholic', 'iv — sous-dominante mineure, crève-cœur'),
+      makeSuggestion((R + 7)  % 12, '7',   'V7',   'tense',       'V7 — dominante appuyée'),
+    ];
+  }
+  return [
+    makeSuggestion((R + 7) % 12, '7',   'V7', 'tense',  'V7 — dominante harmonique'),
+    makeSuggestion((R + 5) % 12, 'maj', 'IV', 'joyful', 'IV — éclat dorien, lumière'),
+    makeSuggestion( R       % 12, 'maj', 'I',  'joyful', 'I — tierce de Picardie, lueur'),
+  ];
+}
+
+// Suggestions pour l'accord suivant, calées sur l'ENSEMBLE de la progression.
+function getProgressionSuggestions(progression) {
+  if (!progression || progression.length === 0) return [];
+  const last = progression[progression.length - 1];
+  const key  = detectKey(progression);
+  // Pas de tonalité claire → repli sur les règles locales du dernier accord.
+  if (!key) return getSuggestions(last);
+
+  const isMajor  = key.scale.id === 'major';
+  const diatonic = scaleChords(key.scale, key.root); // [{root, quality}] par degré
+
+  // Degré du dernier accord dans la tonalité (par triade, sinon par fondamentale).
+  const lastTriad = lookupQuality(last.quality);
+  let lastDeg = diatonic.findIndex(d => d.root === last.root && (lastTriad === null || d.quality === lastTriad));
+  if (lastDeg === -1) lastDeg = diatonic.findIndex(d => d.root === last.root);
+
+  const table   = isMajor ? MAJOR_NEXT : MINOR_NEXT;
+  const moodMap = isMajor ? MAJOR_MOOD : MINOR_MOOD;
+  const descMap = isMajor ? MAJOR_DESC : MINOR_DESC;
+  // Si le dernier accord est hors tonalité, on part du tonique.
+  const entries = (lastDeg >= 0 && table[lastDeg]) ? table[lastDeg] : table[0];
+
+  const list = [];
+  const seen = new Set();
+  const push = (s) => {
+    const k = `${s.root}-${s.quality}`;
+    if (!seen.has(k)) { seen.add(k); list.push(s); }
+  };
+
+  for (const [deg] of entries) {
+    const base = diatonic[deg];
+    let quality = base.quality;
+    let roman   = key.scale.romans[deg];
+    // Enrichissements fonctionnels en tonalité mineure.
+    if (!isMajor && deg === 4) { quality = 'maj';  roman = 'V';  }   // dominante majeure (mineure harmonique)
+    else if (!isMajor && deg === 1) { quality = 'm7b5'; roman = 'iiø'; } // demi-diminué
+    push(makeSuggestion(base.root, quality, roman, moodMap[deg], descMap[deg]));
+  }
+  for (const c of colorChords(key)) push(c);
+
+  return list.slice(0, 8);
+}
+
+// ============================================================
 // MOODS
 // ============================================================
 const MOODS = {
@@ -438,10 +570,11 @@ const COMMON_STARTERS = [
   { root: 9,  quality: 'sus'  }, // Asus
 ];
 
-const ALL_QUALITIES = ['maj', 'min', '7', 'maj7', 'm7', 'sus', 'sus2', 'sus4'];
+const ALL_QUALITIES = ['maj', 'min', '7', 'maj7', 'm7', '6', 'm6', 'add9', 'm7b5', 'sus2', 'sus', 'sus4', 'dim'];
 const QUALITY_LABELS = {
   maj: 'majeur', min: 'mineur', '7': 'dom. 7',
-  maj7: 'maj7', m7: 'm7', sus: 'sus', sus2: 'sus2', sus4: 'sus4',
+  maj7: 'maj7', m7: 'm7', '6': '6', m6: 'm6', add9: 'add9', m7b5: 'm7♭5',
+  sus: 'sus', sus2: 'sus2', sus4: 'sus4', dim: 'dim',
 };
 
 // ============================================================
@@ -737,22 +870,24 @@ export default function App() {
   const [editingIndex, setEditingIndex] = useState(null);        // index of the chord being edited
   const [showScales, setShowScales]   = useState(false);
   const currentChord = progression[progression.length - 1];
+  // Clé de dépendance : toute la progression (les suggestions tiennent compte
+  // de l'ensemble des accords, pas seulement du dernier).
+  const progKey = progression.map(c => `${c.root}-${c.quality}`).join(',');
   const suggestions = useMemo(
-    () => currentChord ? getSuggestions(currentChord) : [],
-    [currentChord && currentChord.root, currentChord && currentChord.quality]
+    () => getProgressionSuggestions(progression),
+    [progKey] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const handleStarter = (chord) => setProgression([{ ...chord, mood: null }]);
   const handleSuggestion = (s) => setProgression(p => [...p, s]);
 
-  // Ajoute un accord brut (depuis la vue gammes) en dérivant l'humeur
-  // s'il correspond à une suggestion répertoriée pour l'accord courant.
+  // Ajoute un accord brut (depuis la vue gammes / choix libre) en dérivant
+  // l'humeur s'il correspond à une suggestion contextuelle de la progression.
   const handleAddChord = (chord) => {
     setProgression(p => {
-      const last = p[p.length - 1];
       let mood = null;
-      if (last) {
-        const sugg = getSuggestions(last);
+      if (p.length) {
+        const sugg = getProgressionSuggestions(p);
         const match = sugg.find(s => s.root === chord.root && s.quality === chord.quality);
         if (match) mood = match.mood;
       }
@@ -771,9 +906,8 @@ export default function App() {
         // Replacing the starter: no previous chord, mood stays null.
         updated[0] = { root: newChord.root, quality: newChord.quality, mood: null };
       } else {
-        // Try to derive the mood from the previous chord's suggestions.
-        const prev = updated[i - 1];
-        const sugg = getSuggestions(prev);
+        // Dérive l'humeur des suggestions contextuelles (tous les accords amont).
+        const sugg = getProgressionSuggestions(updated.slice(0, i));
         const match = sugg.find(s => s.root === newChord.root && s.quality === newChord.quality);
         updated[i] = {
           root: newChord.root,
@@ -1095,9 +1229,14 @@ function BuildScreen({ progression, currentChord, suggestions, editingIndex,
   const isEditing   = editingIndex !== null;
   const focusedChord = isEditing ? progression[editingIndex] : currentChord;
   const prevChord    = isEditing && editingIndex > 0 ? progression[editingIndex - 1] : null;
+  // Suggestions d'édition : fondées sur tous les accords AMONT de celui édité,
+  // pour rester cohérent avec l'ensemble de la progression.
+  const editContextKey = isEditing
+    ? progression.slice(0, editingIndex).map(c => `${c.root}-${c.quality}`).join(',')
+    : '';
   const editSuggestions = useMemo(
-    () => prevChord ? getSuggestions(prevChord) : [],
-    [prevChord && prevChord.root, prevChord && prevChord.quality]
+    () => (isEditing && editingIndex > 0) ? getProgressionSuggestions(progression.slice(0, editingIndex)) : [],
+    [editContextKey, isEditing, editingIndex] // eslint-disable-line react-hooks/exhaustive-deps
   );
   const [showCustomPicker, setShowCustomPicker] = useState(false);
 
